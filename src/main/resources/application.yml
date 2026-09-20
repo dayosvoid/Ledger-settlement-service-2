@@ -1,0 +1,20 @@
+spring:
+  application:
+    name: ledger-settlement
+  datasource:                      # local development database only; tests use Testcontainers
+    url: jdbc:postgresql://localhost:5432/ledger
+    username: ledger
+    password: ledger
+  jpa:
+    hibernate:
+      ddl-auto: validate           # check the entity matches the table, never change it
+    open-in-view: false
+  sql:
+    init:
+      mode: always                 # run schema.sql (needed for PostgreSQL)
+
+server:
+  port: 8080
+
+ledger:
+  fee-rate: 0.031                  # 3.1 percent
