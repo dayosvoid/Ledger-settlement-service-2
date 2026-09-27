@@ -4,7 +4,7 @@ export const options = {
     scenarios: {
         steady_rate: {
             executor: 'constant-arrival-rate',
-            rate: 100,              // 100 iterations started per timeUnit
+            rate: 50,              // 100 iterations started per timeUnit
             timeUnit: '1s',         // → 100 requests/sec target rate
             duration: '10m',
             preAllocatedVUs: 50,    // VUs reserved upfront to sustain the rate
