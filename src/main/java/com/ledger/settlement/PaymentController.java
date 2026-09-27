@@ -11,7 +11,7 @@ import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 public class PaymentController {
 
     private final SettlementService service;
-
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(PaymentController.class);
     public PaymentController(SettlementService service) {
         this.service = service;
     }
@@ -34,6 +34,8 @@ public class PaymentController {
     /** What the merchant is owed. */
     @GetMapping("/settlement")
     public SettlementResponse settlement(@RequestParam String merchantId) {
+        log.info("Handling on thread: {} (virtual: {})",
+                Thread.currentThread(), Thread.currentThread().isVirtual());
         return service.settle(merchantId);
     }
 }
