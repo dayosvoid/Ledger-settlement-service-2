@@ -38,7 +38,10 @@ public class SettlementService {
         if (payments.isEmpty()) {
             throw new MerchantNotFoundException(merchantId);
         }
-        long total = payments.stream().mapToLong(PaymentEntity::getAmountMinor).sum();
+        long total = 0;
+        for (PaymentEntity payment : payments) {
+            total += payment.getAmountMinor();
+        }
         long fee = BigDecimal.valueOf(total).multiply(feeRate)
                 .setScale(0, RoundingMode.DOWN).longValueExact();
         return new SettlementResponse(merchantId, total, fee, total - fee);
