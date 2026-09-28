@@ -1,90 +1,80 @@
+# GC Under Load: Ledger Settlement Service
+
 ## Starting JVM defaults (before any tuning)
 
-| Flag          | Value           |
-|----------------|-----------------|
-| MaxHeapSize    | 2111832064 bytes (~2014 MB / ~1.97 GB) |
-| UseG1GC        | true (ergonomic default) |git branch
+| Flag        | Value                                  |
+|-------------|----------------------------------------|
+| MaxHeapSize | 2111832064 bytes (~2014 MB, ergonomic) |
+| UseG1GC     | true (ergonomic default)               |
 
-Note: the JFR recording (10min, started at JVM launch) ended ~40s before the k6 load run completed,
-since the JVM took ~36s to fully start before k6 began sending traffic. The recording captures
-~9m20s of the full 10-minute steady-state load, which is sufficient for stable GC behavior analysis.
+## Method
 
+- Load: `perf/steady-load.js`, k6 constant-arrival-rate, 50 req/s for 10 minutes against
+  `GET /payments/settlement?merchantId=MR-4471`.
+- Recording: `java -XX:StartFlightRecording=duration=10m,filename=<name>.jfr,settings=profile -jar ...`
+  started at JVM launch. The JVM took ~35 s to start, so the recording began before load did and
+  ended ~40 s before the k6 run finished.
+- Each configuration was measured once. There are no repeated runs and therefore no error bars.
 
-
-## Baseline GC Profile (gc-baseline.jfr)
+## Baseline GC profile (gc-baseline.jfr)
 
 | Metric                  | Value |
-|--------------------------|-------|
-| Allocation rate          | ~2.3 MB/s (derived from heap-before/after deltas across 46 collections over the 600s recording) |
-| Top 3 allocating classes | byte[] (40.01%), java.lang.String (6.31%), java.net.URL (4.45%) — note: java.net.URL and the related JarFileUrlKey (2.25%) reflect one-time classloading during the ~36s JVM startup window captured at the start of this recording, not steady-state request handling; byte[] is the genuine steady-state signal |
-| Collection count          | 46 total (38 Young, 8 Old) |
-| Longest pause             | 28.3 ms (Old GC, GC ID 40, 19:57:55) |
+|-------------------------|-------|
+| Collection count        | 46 (38 young, 8 old) |
+| Longest pause           | 28.3 ms (Old GC), from the "Longest Pause" column of `jfr view gc` |
+| Allocation rate         | ~1.2 MB/s over the load period, estimated from heap-before minus previous heap-after in `jfr view gc`. The whole-recording average is higher because JVM startup allocates in a burst. |
+| Top allocating classes  | Request threads only (`http-nio-8080-exec-*`, 49,398 samples), by sample count: `java.lang.Object[]` 4,655; `byte[]` 3,546; `java.util.LinkedHashMap` 1,683 |
 
+The recording-wide `allocation-by-class` view was not used: `byte[]` (40%), `java.net.URL` and
+`JarFileUrlKey` there come from Spring Boot jar loading on the `main` thread in the first two seconds.
 
-## Problem Classification
+## Problem classification
 
-This profile shows **allocation pressure**, not a pause-time problem:
+The profile shows **allocation pressure in framework code, not a pause problem**.
 
-- `byte[]` alone accounts for 40.01% of allocation samples — a single class dominating the profile,
-  the classic signature of allocation pressure rather than long individual collections.
-- GC pauses are short and healthy: 46 collections total, longest pause 28.3 ms, most young-gen pauses
-  under 20 ms. This does not match a pause-time problem (which would show modest allocation with long
-  individual collections).
-- Notably, GC pause time (max 28.3 ms) is far smaller than the request latency tail observed under load
-  (p99 2.38s, max 5.22s) — GC is not the primary driver of tail latency here. The dominant `byte[]`
-  allocation is worth reducing regardless, but the multi-second latency outliers likely stem from a
-  different source (database/connection-pool contention, serialization overhead) outside GC's control.
+- Pauses are short: 46 collections, longest 28.3 ms, most young pauses under 20 ms.
+- The request latency tail (p99 2.38 s, max 5.22 s) is far larger than any GC pause, so GC is not
+  the main driver of tail latency. Both runs started cold, so the tail likely includes JVM and
+  Hibernate warmup as well.
+- Most sampled allocation on request threads is Tomcat and Spring MVC overhead
+  (`CopyOnWriteArrayList.toArray()` in `Request.setAttribute`, `HandlerExecutionChain` building,
+  `Request.markStartTime`), which this service does not control.
+- Only 1,136 of the 49,398 samples had `com.ledger.settlement` in the stack. The recurring site was
+  `SettlementService.settle(String)` line 41, `payments.stream().mapToLong(...).sum()`, which builds
+  a stream pipeline on every request just to sum a small list.
 
-**Conclusion:** proceed with the allocation-pressure path — find and fix the hot `byte[]` allocation site
-in code, rather than tuning heap size or switching collectors.
+**Decision:** allocation path, so fix the one application-level site in code. No heap or collector
+flag was changed.
 
+## The change
 
-## Problem Classification
+Replaced the stream in `settle()` with an accumulator loop. The result is identical and the per-call
+stream objects are gone.
 
-This profile shows **allocation pressure**, not a pause-time problem:
+## Before / after
 
-- GC pauses are short and healthy: 46 collections total (38 young, 8 old), longest actual stop-the-world
-  pause 28.3 ms (from `jfr view gc`'s "Longest Pause" column — the raw `jdk.GarbageCollection` event's
-  `duration` field includes non-pause bookkeeping and is not the right number to use here).
-- GC pause time (max 28.3 ms) is far smaller than the request latency tail observed under load
-  (p99 2.38s, max 5.22s) — GC is not the primary driver of tail latency in this service.
-- Filtering `jdk.ObjectAllocationSample` events to only request-handling threads (`http-nio-8080-exec-*`,
-  excluding JVM startup noise on the `main` thread) gives ~49,398 real samples. The top allocators —
-  `java.lang.Object[]` (4655), `byte[]` (3546), `java.util.LinkedHashMap` (1683), `java.time.Instant` (1497)
-  — are overwhelmingly Tomcat/Spring MVC framework overhead (request attribute-change listener notification,
-  interceptor chain construction, per-request timing), not application code.
-- Only 1,136 of the 49,398 samples touched `com.ledger.settlement` code anywhere in their stack. Of those,
-  the single recurring hot site was `SettlementService.settle(String)` line 41 — a
-  `payments.stream().mapToLong(PaymentEntity::getAmountMinor).sum()` call that builds a fresh stream
-  pipeline (spliterator, intermediate pipeline stages) on every request just to sum a small list of longs.
+| Metric                 | Baseline (gc-baseline.jfr) | Tuned (gc-tuned.jfr) |
+|------------------------|----------------------------|----------------------|
+| Allocation rate (load period) | ~1.2 MB/s           | ~1.0 MB/s            |
+| Steady young-GC cycle  | ~45 MB every ~44 s (~1.0 MB/s) | ~36 MB every ~34 s (~1.05 MB/s) |
+| Collection count       | 46 (38 young, 8 old)       | 46 (39 young, 7 old) |
+| Longest pause          | 28.3 ms (Old GC)           | 97.6 ms (Old GC)     |
+| p99 request latency    | 2.38 s                     | 1.39 s               |
+| Max request latency    | 5.22 s                     | 4.42 s               |
+| Dropped iterations     | 366                        | 188                  |
+| Throughput             | 49.39 req/s                | 49.69 req/s          |
 
-**Conclusion:** the numerically dominant allocation is framework overhead outside this service's control.
-The one genuine, fixable application-level hot site is the stream pipeline in `settle()`, replaced with a
-plain accumulator loop — same result, zero stream-machinery allocation per request.
-
-
-
-## Before / After Comparison
-
-| Metric                    | Baseline (gc-baseline.jfr) | Tuned (gc-tuned.jfr) |
-|----------------------------|------------------------------|------------------------|
-| Allocation rate            | ~2.3 MB/s                   | ~2.14 MB/s             |
-| Collection count           | 46 (38 young, 8 old)         | 46 (39 young, 7 old)   |
-| Longest pause               | 28.3 ms (Old GC)             | 97.6 ms (Old GC)       |
-| p99 request latency         | 2.38 s                      | 1.39 s                 |
-| Throughput                  | 49.39 req/s                 | 49.69 req/s            |
-
-Note: throughput is essentially identical since both runs targeted the same 50 req/s constant arrival
-rate — the meaningful signal is in latency and dropped iterations (366 → 188), not raw req/s.
-
+**Reading the table.** Throughput is the same because both runs target 50 req/s. The steady young-GC
+cycle shows no difference in allocation rate. The p99, max and dropped-iteration differences come
+from one run each, both cold-started, with no error bars, so they are reported as **inconclusive**:
+a separate 30 s smoke test at the same rate gave p99 1.03 s, which shows how much a single run moves.
+The stream-to-loop change saves microseconds per request and cannot plausibly explain a ~1 s
+change in p99.
 
 ## Trade-off
 
-The `settle()` allocation fix modestly reduced allocation rate (~2.3→2.14 MB/s) and clearly improved
-request-tail latency (p99 2.38s→1.39s, max 5.22s→4.42s, dropped iterations 366→188). However, the tuned
-run's single longest GC pause (97.6ms) is worse than baseline's (28.3ms), and several other Old GC pauses
-ran higher too — this is likely normal run-to-run variance in Old-generation promotion timing rather than
-a consequence of the code change itself, since the fix only removed short-lived stream-pipeline objects
-that die young and wouldn't reach the old generation. This trade is acceptable because even the worst-case
-pause (97.6ms) remains two orders of magnitude smaller than the multi-second p99/max request latency this
-service already exhibits — GC is not, and was never, the bottleneck limiting this endpoint's tail latency.
+The longest pause rose from 28.3 ms to 97.6 ms in the tuned run. Removing short-lived stream objects
+should not push more data into the old generation, so this is most likely old-generation timing
+variance, but one run cannot confirm that. It is acceptable for this service because even 97.6 ms is
+well below the request-latency tail already seen in both runs. The change is justified by the
+profile evidence, not by the load-test deltas.
