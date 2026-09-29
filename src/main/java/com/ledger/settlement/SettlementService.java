@@ -15,7 +15,6 @@ public class SettlementService {
     private final PaymentRepository repository;
     private final BigDecimal feeRate;
 
-    // Constructor injection: Spring passes in the repository and the value of ledger.fee-rate.
     public SettlementService(PaymentRepository repository,
                              @Value("${ledger.fee-rate}") BigDecimal feeRate) {
         this.repository = repository;
@@ -38,6 +37,7 @@ public class SettlementService {
         if (payments.isEmpty()) {
             throw new MerchantNotFoundException(merchantId);
         }
+        BigDecimal rate = ExchangeRateTable.rateFor("USD"); // touches the class, triggers <clinit> on first call
         long total = payments.stream().mapToLong(PaymentEntity::getAmountMinor).sum();
         long fee = BigDecimal.valueOf(total).multiply(feeRate)
                 .setScale(0, RoundingMode.DOWN).longValueExact();
