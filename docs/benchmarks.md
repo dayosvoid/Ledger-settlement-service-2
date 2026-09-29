@@ -20,7 +20,6 @@ Findings:
 - The settlement calculation was not eliminated even when its result was discarded, so whether DCE happens depends on the method.
 - The error bars are wide because 3 iterations from 1 fork is too little data. The final run fixes this.
 
-
 ## Configuration
 
 All benchmarks use `@BenchmarkMode(Mode.AverageTime)`, `@OutputTimeUnit(TimeUnit.MICROSECONDS)`, `@Warmup(iterations = 5)`, `@Measurement(iterations = 10)` and `@Fork(3)`, with 1 s per iteration and 1 thread. JDK 25.0.4.1 (HotSpot), default JVM options, Windows machine, `-prof gc`. Command: `java -jar benchmarks/target/benchmarks.jar LedgerBenchmarks -prof gc -rf json -rff results.json`.
@@ -42,6 +41,7 @@ Notes:
 - JSON: 28 of 30 iterations fall between 1.04 and 1.47 µs. Two outliers (2.49 and 11.66 µs), both in fork 1, widen the error. No GC ran during the 11.66 µs iteration, so the cause is not GC and is unknown. The mean is reported unedited.
 - The settlement input is 100 payments. The dead-code table above used 3, so those numbers are not comparable.
 - 40 B/op for mapping is consistent with one `PaymentResponse` object per call. The 240 B/op for settlement covers BigDecimal values, stream pipeline objects and the response record; it is not itemised.
+- `results-run1.json` is an earlier run of the same configuration, kept as evidence. Its JSON time (3.803 ± 6.029 µs/op) was dominated by a single 50.6 µs first iteration in fork 1, so it was repeated on a quieter machine and the second run is reported above. Mapping and settlement agreed between the two runs.
 
 ## Comparisons
 
@@ -54,6 +54,8 @@ Notes:
 | Settlement, three runs | 0.227 ± 0.016, 0.233 ± 0.023, 0.232 ± 0.032 µs | | No difference |
 | JSON, three runs | 1.562 ± 0.529, 3.803 ± 6.029, 1.532 ± 1.290 µs | | Inconclusive (outliers in fork 1) |
 
+"Three runs" means: an initial run without `-prof gc` (console output only, no JSON saved), `results-run1.json` (with `-prof gc`), and the final `results.json`. All three used the same configuration.
+
 The three benchmarks measure different work, so they are not compared with each other.
 
 ## Limits: what this suite does not tell you
@@ -63,6 +65,3 @@ The three benchmarks measure different work, so they are not compared with each 
 3. **Harness vs live request path.** There is no HTTP, no Spring MVC, no transaction and no database. `settle()` is dominated by the query, so the 0.232 µs calculation is a small part of a real settlement request. The Jackson mapper here is a plain `JsonMapper`, not the one Spring Boot configures.
 4. **Environment.** One Windows machine, default JVM options, no CPU pinning or fixed clock speed. The run-to-run drift in mapping (18 to 13 ns) and the JSON outliers show that machine state moves the numbers. JMH also notes that compiler blackholes are experimental on this JVM.
 5. **Input shape.** Amounts come from one seeded random distribution and one fee rate. Other amount ranges or fee rates may behave differently.
-
-
-- `results-run1.json` is an earlier run of the same configuration, kept as evidence. Its JSON time (3.803 ± 6.029 µs/op) was dominated by a single 50.6 µs first iteration in fork 1, so it was repeated on a quieter machine and the second run is reported above. Mapping and settlement agreed between the two runs.
