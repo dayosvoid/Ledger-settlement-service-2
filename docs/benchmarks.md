@@ -63,3 +63,6 @@ The three benchmarks measure different work, so they are not compared with each 
 3. **Harness vs live request path.** There is no HTTP, no Spring MVC, no transaction and no database. `settle()` is dominated by the query, so the 0.232 µs calculation is a small part of a real settlement request. The Jackson mapper here is a plain `JsonMapper`, not the one Spring Boot configures.
 4. **Environment.** One Windows machine, default JVM options, no CPU pinning or fixed clock speed. The run-to-run drift in mapping (18 to 13 ns) and the JSON outliers show that machine state moves the numbers. JMH also notes that compiler blackholes are experimental on this JVM.
 5. **Input shape.** Amounts come from one seeded random distribution and one fee rate. Other amount ranges or fee rates may behave differently.
+
+
+- `results-run1.json` is an earlier run of the same configuration, kept as evidence. Its JSON time (3.803 ± 6.029 µs/op) was dominated by a single 50.6 µs first iteration in fork 1, so it was repeated on a quieter machine and the second run is reported above. Mapping and settlement agreed between the two runs.
