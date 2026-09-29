@@ -38,6 +38,11 @@ public class SettlementService {
         if (payments.isEmpty()) {
             throw new MerchantNotFoundException(merchantId);
         }
+        return calculate(merchantId, payments, feeRate);
+    }
+
+    static SettlementResponse calculate(String merchantId, List<PaymentEntity> payments,
+                                        BigDecimal feeRate) {
         long total = payments.stream().mapToLong(PaymentEntity::getAmountMinor).sum();
         long fee = BigDecimal.valueOf(total).multiply(feeRate)
                 .setScale(0, RoundingMode.DOWN).longValueExact();
